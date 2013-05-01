@@ -1,5 +1,4 @@
 all: 
-	make TARGET=th12 coap-post
 	make TARGET=th12-lowpower coap-post-sleep
 
 ifndef TARGET
@@ -22,7 +21,7 @@ WITH_UIP6=1
 # for some platforms
 UIP_CONF_IPV6=1
 
-PROJECT_SOURCEFILES += dht.c 
+PROJECT_SOURCEFILES += current.c 
 
 PROJECTDIRS += ./rplinfo
 PROJECT_SOURCEFILES += rplinfo.c

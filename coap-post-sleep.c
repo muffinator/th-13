@@ -36,13 +36,13 @@
 /* how long to wait between posts */
 #define DEFAULT_POST_INTERVAL 5
 /* stay awake for this long on power up */
-#define DEFAULT_WAKE_TIME 120
+#define DEFAULT_WAKE_TIME 10
 /* perform a sink check this number of wake cycles */
 #define DEFAULT_POSTS_PER_CHECK 4
 /* after SINK_CHECK_TRIES of sink check failures, the node will reboot itself */
 #define DEFAULT_MAX_POST_FAILS 3
 /* whether or not the sensor is allowed to sleep */
-#define DEFAULT_SLEEP_ALLOWED 0
+#define DEFAULT_SLEEP_ALLOWED 1
 
 /* MAX len for paths and hostnames */
 #define SINK_MAXLEN 31
@@ -124,6 +124,23 @@ static rpl_dag_t *dag;
 static process_event_t ev_resolv_failed;
 static process_event_t ev_post_con_started, ev_post_complete;
 
+volatile char rupt = 0;
+void adc_isr(void)
+{
+    if((*CRM_WU_CNTL&0x8)==0x8)
+    {
+        *CRM_SLEEP_CNTL |= 0x1; //this is magic, don't know why it works, just needs to be here!!! 
+    }
+
+    if(((ADC->IRQ)&0x1000) == 0x1000)
+    {
+        *CRM_WU_CNTL &= ~(0x8);
+        uint16_t trig = ADC->TRIGGERS;
+        rupt = ((trig&0x0008)==0x0008);
+    }
+
+    ADC->IRQ = 0xf000;
+}
 
 /* flash config */
 /* MAX len for paths and hostnames */
@@ -150,8 +167,7 @@ typedef struct {
 
 static TH12Config th12_cfg;
 
-void 
-th12_config_set_default(TH12Config *c) 
+void th12_config_set_default(TH12Config *c) 
 {
   c->magic = TH12_CONFIG_MAGIC;
   c->version = TH12_CONFIG_VERSION;
@@ -212,8 +228,7 @@ void th12_config_print(void) {
 	PRINTF("\n\r");	
 }
 
-int
-ipaddr_sprint(char *s, const uip_ipaddr_t *addr)
+int ipaddr_sprint(char *s, const uip_ipaddr_t *addr)
 {
   uint16_t a;
   unsigned int i;
@@ -240,8 +255,7 @@ ipaddr_sprint(char *s, const uip_ipaddr_t *addr)
 
 RESOURCE(config, METHOD_GET | METHOD_POST , "config", "title=\"Config parameters\";rt=\"Data\"");
 
-void
-config_handler(void* request, void* response, uint8_t *buffer, uint16_t preferred_size, int32_t *offset)
+void config_handler(void* request, void* response, uint8_t *buffer, uint16_t preferred_size, int32_t *offset)
 {
   uint8_t *param;
   uip_ipaddr_t *new_addr;
@@ -413,6 +427,51 @@ uint16_t create_error_msg(char *error, char *buf)
 
 PROCESS_NAME(do_post);
 
+void adc_thresh_sleep(uint16_t thresh, uint8_t gtlt, uint16_t rsamp)
+{
+	maca_off();
+    GPIO->FUNC_SEL.ADC3 = 1;
+    GPIO->PAD_DIR.ADC3 = 0; 
+    GPIO->PAD_KEEP.ADC3 = 0; 
+    GPIO->PAD_PU_EN.ADC3 = 0; 
+	adc_init();
+    ADC->COMP_3 = 0x38ff;//(gtlt<<15)|(3<<12)|(thresh&0xfff); 
+    ADC->SEQ_1 = 0x8;//(1<<3); 
+	ADC->CONTROL &= ~0xe000;
+   
+	CRM->WU_CNTLbits.RTC_WU_IEN = 0;
+	CRM->WU_CNTLbits.TIMER_WU_EN = 0;
+	CRM->WU_CNTLbits.RTC_WU_EN = 1;
+	CRM->WU_CNTLbits.AUTO_ADC = 1;
+	CRM->RTC_TIMEOUT = 200;//(rtc_freq/rsamp);
+//	CRM->WU_TIMEOUT = 100;
+	enable_irq(ADC);
+
+	CRM->SLEEP_CNTLbits.DOZE = 0;
+	CRM->SLEEP_CNTLbits.RAM_RET = 3;
+	CRM->SLEEP_CNTLbits.MCU_RET = 1;
+	CRM->SLEEP_CNTLbits.DIG_PAD_EN = 1;
+	CRM->SLEEP_CNTLbits.HIB = 1;
+  /* wait for the sleep cycle to complete */
+  while((*CRM_STATUS & 0x1) == 0) { continue; }
+  /* write 1 to sleep_sync --- this clears the bit (it's a r1wc bit) and powers down */
+  *CRM_STATUS = 1;
+
+  /* asleep */
+
+  /* wait for the awake cycle to complete */
+  while((*CRM_STATUS & 0x1) == 0) { continue; }
+  /* write 1 to sleep_sync --- this clears the bit (it's a r1wc bit) and finishes wakeup */
+  *CRM_STATUS = 1;
+
+    CRM->WU_CNTLbits.TIMER_WU_EN = 0;
+    CRM->WU_CNTLbits.RTC_WU_EN = 1;
+	CRM->WU_CNTLbits.RTC_WU_IEN = 1;
+    clock_init();
+    clock_adjust_ticks((CRM->RTC_COUNT*CLOCK_CONF_SECOND)/rtc_freq);
+}
+
+
 void
 go_to_sleep(void *ptr)
 {
@@ -432,9 +491,10 @@ go_to_sleep(void *ptr)
 		  gpio_reset(KBI1);
 		}
 
-		if (next_post > (clock_time() + 5)) {
-		  rtimer_arch_sleep((next_post - clock_time() - 5) * (rtc_freq/CLOCK_CONF_SECOND));
-		}
+	//	if (next_post > (clock_time() + 5)) {
+		 // rtimer_arch_sleep((next_post - clock_time() - 5) * (rtc_freq/CLOCK_CONF_SECOND));
+			adc_thresh_sleep(0x8ff,0,10);
+	//	}
 
 		current_init();
 	} else {
@@ -538,7 +598,7 @@ PROCESS_THREAD(do_post, ev, data)
   PRINTF("do post\n\r");
 
   /* we do a NON post since a CON could take 60 seconds to time out and we don't want to stay awake that long */
-  if (!resolv_ok || (wakes % th12_cfg.posts_per_check ) == 0) {
+  if (1==0){//!resolv_ok || (wakes % th12_cfg.posts_per_check ) == 0) {
     PRINTF("sink check with CON\n");
     resolv_ok = -1; sink_ok = 0;
     if (strncmp("", th12_cfg.sink_name, SINK_MAXLEN) == 0) {
@@ -719,6 +779,7 @@ PROCESS_THREAD(th_12, ev, data)
 
   current_init();
   adc_setup_chan(0); /* battery voltage through divider */
+  adc_setup_chan(3);
   adc_setup_chan(5);
   adc_setup_chan(6);
 
@@ -749,7 +810,6 @@ PROCESS_THREAD(th_12, ev, data)
   ctimer_set(&ct_report_batt, BATTERY_DELAY, set_report_batt_ok, NULL);
 
   while(1) {
-
     PROCESS_WAIT_EVENT();
 
     if(ev == PROCESS_EVENT_TIMER && etimer_expired(&et_do_current)) {

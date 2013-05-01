@@ -29,4 +29,13 @@ typedef struct th12_state th12_t;
 
 extern th12_t sys;
 
+#define adc_pin(chan, gtlt, thresh) \
+	GPIO->FUNC_SEL.chan = 1; \
+	GPIO->PAD_DIR.chan = 0; \
+	GPIO->PAD_KEEP.chan = 0; \
+	GPIO->PAD_PU_EN.chan = 0; \
+	ADC->COMP_chan = (gtlt<<15)|(chan<<12)|(thresh&0xfff); \
+	ADC->SEQ_1 = (1<<chan); \
+
+
 #endif /* __SHELL_COMPRESSOR_H__ */

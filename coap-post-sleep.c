@@ -22,7 +22,7 @@
 
 /* th-12 */
 #include "th-12.h"
-#include "dht.h"
+#include "current.h"
 
 /* default POST location */
 /* hostname for the sink */
@@ -34,7 +34,7 @@
 /* node should recover with in 8 min. Worst case would be 24min and triggering a reboot */ 
 
 /* how long to wait between posts */
-#define DEFAULT_POST_INTERVAL 120
+#define DEFAULT_POST_INTERVAL 5
 /* stay awake for this long on power up */
 #define DEFAULT_WAKE_TIME 120
 /* perform a sink check this number of wake cycles */
@@ -42,7 +42,7 @@
 /* after SINK_CHECK_TRIES of sink check failures, the node will reboot itself */
 #define DEFAULT_MAX_POST_FAILS 3
 /* whether or not the sensor is allowed to sleep */
-#define DEFAULT_SLEEP_ALLOWED 1
+#define DEFAULT_SLEEP_ALLOWED 0
 
 /* MAX len for paths and hostnames */
 #define SINK_MAXLEN 31
@@ -79,8 +79,8 @@ AUTOSTART_PROCESSES(&th_12, &resolv_process);
 
 static void set_sleep_ok(void *ptr);
 static struct ctimer ct_powerwake;
-struct etimer et_do_dht, et_poweron_timeout;
-static dht_result_t dht_current;
+struct etimer et_do_current, et_poweron_timeout;
+static current_result_t current_current;
 
 /* sink state */
 static uint8_t sink_ok = 0;
@@ -303,7 +303,7 @@ config_handler(void* request, void* response, uint8_t *buffer, uint16_t preferre
 		(strncmp(pstr, "path", len) == 0)  ||
 		(strncmp(pstr, "ip", len) == 0) ) {
       sink_ok = 0; resolv_ok = 0; wakes = 0;
-      process_start(&read_dht, NULL);
+      process_start(&read_current, NULL);
     } else if(strncmp(pstr, "channel", len) == 0) {
       set_channel(mc1322x_config.channel);
       mc1322x_config_save(&mc1322x_config);
@@ -336,7 +336,7 @@ bad:
 
 char buf[256];
 
-uint16_t create_dht_msg(dht_result_t *d, char *buf)
+uint16_t create_current_msg(current_result_t *c, char *buf)
 {
 	rpl_dag_t *dag;
 	uint8_t n = 0;
@@ -346,14 +346,14 @@ uint16_t create_dht_msg(dht_result_t *d, char *buf)
 
 	addr = &rimeaddr_node_addr;
 
-	if(d->t < 0) {
+	if(c->t < 0) {
 	  neg = '-';
-	  int_t = (-1 * d->t)/10;
-	  frac_t = (-1 * d->t) % 10;
+	  int_t = (-1 * c->t)/10;
+	  frac_t = (-1 * c->t) % 10;
 	} else {
 	  neg = ' ';
-	  int_t = d->t/10;
-	  frac_t = d->t % 10;
+	  int_t = c->t/10;
+	  frac_t = c->t % 10;
 	}
 
 	/* {"eui":"ec473c4d12bdd1ce","t":" 22.1C","h":"18.3%","vb":"2678mV"} */
@@ -369,8 +369,8 @@ uint16_t create_dht_msg(dht_result_t *d, char *buf)
 		     neg,
 		     int_t,
 		     frac_t,
-		     d->rh / 10,
-		     d->rh % 10,
+		     c->rh / 10,
+		     c->rh % 10,
 		     vbatt
 		);
 
@@ -420,7 +420,7 @@ go_to_sleep(void *ptr)
 	if(sleep_ok == 1) {
 		PRINTF("go to sleep\n\r");
 		/* sleep until we need to post */
-		dht_uninit();
+		current_uninit();
 
 		if(vbatt < 2700) {
 		  /* drive KBI2 high during sleep */
@@ -436,7 +436,7 @@ go_to_sleep(void *ptr)
 		  rtimer_arch_sleep((next_post - clock_time() - 5) * (rtc_freq/CLOCK_CONF_SECOND));
 		}
 
-		dht_init();
+		current_init();
 	} else {
 		PRINTF("can't sleep now, sleep not ok\n\r");
 	}
@@ -525,6 +525,8 @@ PROCESS_THREAD(resolv_sink, ev, data)
   PROCESS_END();
 }
 
+extern current_result_t c;
+
 PROCESS(do_post, "post results");
 PROCESS_THREAD(do_post, ev, data)
 {
@@ -556,7 +558,7 @@ PROCESS_THREAD(do_post, ev, data)
   }
   coap_set_header_uri_path(request, th12_cfg.sink_path);
 
-  coap_set_payload(request, buf, strlen(buf));
+  coap_set_payload(request, (const void *)c.data, 512);
 
   /* there is no good way to know if a NON request has finished */
   /* if it sucessful we might get a response back in client_chuck_handler */
@@ -594,38 +596,46 @@ PROCESS_THREAD(do_post, ev, data)
 
 static process_event_t ev_sensor_retry_request;
 
-void do_result( dht_result_t d) {
+void do_result( current_result_t c) {
 	uint16_t frac_t, int_t;
 	char neg = ' ';
 
 	sensor_tries++;
 
-	if (d.ok == 1) {
+	if (c.ok == 1) {
 
 		adc_service();
 
-		dht_current.t = d.t;
-		dht_current.rh = d.rh;
+		current_current.t = c.t;
+		current_current.rh = c.rh;
 
 #if DEBUG_ANNOTATE || DEBUG_FULL
-		if(d.t < 0) {
+		if(c.t < 0) {
 			neg = '-';
-			int_t = (-1 * d.t)/10;
-			frac_t = (-1 * d.t) % 10;
+			int_t = (-1 * c.t)/10;
+			frac_t = (-1 * c.t) % 10;
 		} else {
 			neg = ' ';
-			int_t = d.t/10;
-			frac_t = d.t % 10;
+			int_t = c.t/10;
+			frac_t = c.t % 10;
 		}
 #endif
 
-		ANNOTATE("temp: %c%d.%dC humid: %d.%d%%, ", neg, int_t, frac_t, d.rh / 10, d.rh % 10);
+		ANNOTATE("temp: %c%d.%dC humid: %d.%d%%, ", neg, int_t, frac_t, c.rh / 10, c.rh % 10);
 		ANNOTATE("a0: %4dmV, a5: %4dmV, a6: %4dmV ", adc_voltage(0), adc_voltage(5), adc_voltage(6));
 		vbatt = adc_voltage(0) * 2;
 		ANNOTATE("vbatt: %dmV ", vbatt);
 		ANNOTATE("\n\r");
+		int x;
+		int y;
+		for(x=0;x<16;x++){
+			for(y=0;y<16;y++){
+				ANNOTATE("%4d ", c.data[x*16+y]);
+			}
+			ANNOTATE("\n");
+		}
 
-		create_dht_msg(&d, buf);
+		create_current_msg(&c, buf);
 
 		/* NON posts leave the do_post process hanging around */
 		/* kill it so we can start another */
@@ -690,7 +700,7 @@ PROCESS_THREAD(th_12, ev, data)
 //  rplinfo_activate_resources();
   rest_activate_resource(&resource_config);
 
-  register_dht_result(do_result);
+  register_current_result(do_result);
 
   PRINTF("Sleeping Temp/Humid Sensor\n\r");
 
@@ -703,12 +713,11 @@ PROCESS_THREAD(th_12, ev, data)
   GPIO->PAD_DIR_SET.KBI2 = 1;
   gpio_set(KBI2);
 
-  /* use T2 as a debug pin */
   GPIO->FUNC_SEL.TMR2 = 3;
   GPIO->PAD_DIR_SET.TMR2 = 1;
   gpio_set(TMR2);
 
-  dht_init();
+  current_init();
   adc_setup_chan(0); /* battery voltage through divider */
   adc_setup_chan(5);
   adc_setup_chan(6);
@@ -735,7 +744,7 @@ PROCESS_THREAD(th_12, ev, data)
 
   /* do an initial post on startup */
   /* this will be a "sink check" and will wait for a DAG to be found and force a sink resolv */
-  etimer_set(&et_do_dht, 5 * CLOCK_SECOND);
+  etimer_set(&et_do_current, 5 * CLOCK_SECOND);
   ctimer_set(&ct_powerwake, th12_cfg.wake_time * CLOCK_SECOND, set_sleep_ok, NULL);
   ctimer_set(&ct_report_batt, BATTERY_DELAY, set_report_batt_ok, NULL);
 
@@ -743,12 +752,12 @@ PROCESS_THREAD(th_12, ev, data)
 
     PROCESS_WAIT_EVENT();
 
-    if(ev == PROCESS_EVENT_TIMER && etimer_expired(&et_do_dht)) {
-      PRINTF("do_dht expired\n\r");
+    if(ev == PROCESS_EVENT_TIMER && etimer_expired(&et_do_current)) {
+      PRINTF("do_current expired\n\r");
       PRINTF("sink_ok %d wakes %d failed %d retry %d\n\r", sink_ok, wakes, sink_checks_failed, retry);
       PRINTF("mod %d\n", wakes % th12_cfg.posts_per_check);
       next_post = clock_time() + th12_cfg.post_interval * CLOCK_SECOND;
-      etimer_set(&et_do_dht, th12_cfg.post_interval * CLOCK_SECOND);
+      etimer_set(&et_do_current, th12_cfg.post_interval * CLOCK_SECOND);
 
       if (sink_checks_failed >= th12_cfg.max_post_fails) {
 	if(vbatt > 2700) {
@@ -768,8 +777,8 @@ PROCESS_THREAD(th_12, ev, data)
       }
 
       if(sleep_ok == 1) {
-	dht_init();
-
+	current_init();
+	PRINTF("initing current\n");
 	CRM->WU_CNTLbits.EXT_OUT_POL = 0xf; /* drive KBI0-3 high during sleep */
 	rtimer_arch_sleep(2 * rtc_freq);
 	maca_on();
@@ -779,26 +788,26 @@ PROCESS_THREAD(th_12, ev, data)
       if (!retry) {
 	sensor_tries = 0;
       }
-      process_start(&read_dht, NULL);
+      process_start(&read_current, NULL);
     }
 
     if ( ev == ev_post_con_started) {
-      etimer_stop(&et_do_dht);
-      PRINTF("stopping do_dht timer: waiting for CON to complete\n\r");
+      etimer_stop(&et_do_current);
+      PRINTF("stopping do_current timer: waiting for CON to complete\n\r");
     }
 
     if( ev == ev_post_complete ) {
       next_post = clock_time() + th12_cfg.post_interval * CLOCK_SECOND;
-      etimer_set(&et_do_dht, th12_cfg.post_interval * CLOCK_SECOND);
+      etimer_set(&et_do_current, th12_cfg.post_interval * CLOCK_SECOND);
       retry = 0;
-      PRINTF("do_dht scheduled\n");
+      PRINTF("do_current scheduled\n");
       go_to_sleep(NULL);
     }
 
     if ( ev == ev_sensor_retry_request ) {
       retry = 1;
       next_post = clock_time() + RETRY_INTERVAL;
-      etimer_set(&et_do_dht, RETRY_INTERVAL);
+      etimer_set(&et_do_current, RETRY_INTERVAL);
       PRINTF("sensor failed schedule retry\n");
     }
   }

@@ -430,13 +430,13 @@ PROCESS_NAME(do_post);
 void adc_thresh_sleep(uint16_t thresh, uint8_t gtlt, uint16_t rsamp)
 {
 	maca_off();
-    GPIO->FUNC_SEL.ADC3 = 1;
-    GPIO->PAD_DIR.ADC3 = 0; 
-    GPIO->PAD_KEEP.ADC3 = 0; 
-    GPIO->PAD_PU_EN.ADC3 = 0; 
+    GPIO->FUNC_SEL.ADC1 = 1;
+    GPIO->PAD_DIR.ADC1 = 0; 
+    GPIO->PAD_KEEP.ADC1 = 0; 
+    GPIO->PAD_PU_EN.ADC1 = 0; 
 	adc_init();
-    ADC->COMP_3 = 0x38ff;//(gtlt<<15)|(3<<12)|(thresh&0xfff); 
-    ADC->SEQ_1 = 0x8;//(1<<3); 
+    ADC->COMP_1 = 0x14cd;//(gtlt<<15)|(3<<12)|(thresh&0xfff); 
+    ADC->SEQ_1 = 0x2;//(1<<3); 
 	ADC->CONTROL &= ~0xe000;
    
 	CRM->WU_CNTLbits.RTC_WU_IEN = 0;
@@ -746,7 +746,6 @@ PROCESS_THREAD(th_12, ev, data)
 {
 
   PROCESS_BEGIN();
-
   ev_post_con_started = process_alloc_event();
   ev_post_complete = process_alloc_event();
   ev_sensor_retry_request = process_alloc_event();
@@ -779,7 +778,7 @@ PROCESS_THREAD(th_12, ev, data)
 
   current_init();
   adc_setup_chan(0); /* battery voltage through divider */
-  adc_setup_chan(3);
+  adc_setup_chan(1);
   adc_setup_chan(5);
   adc_setup_chan(6);
 
@@ -809,6 +808,7 @@ PROCESS_THREAD(th_12, ev, data)
   ctimer_set(&ct_powerwake, th12_cfg.wake_time * CLOCK_SECOND, set_sleep_ok, NULL);
   ctimer_set(&ct_report_batt, BATTERY_DELAY, set_report_batt_ok, NULL);
 
+	adc_thresh_sleep(0x08ff,0,10);
   while(1) {
     PROCESS_WAIT_EVENT();
 
